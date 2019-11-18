@@ -39,6 +39,7 @@
 #include "clang/AST/UnresolvedSet.h"
 #include "clang/Basic/CommentOptions.h"
 #include "clang/Basic/Diagnostic.h"
+#include "clang/Basic/DiagnosticFrontend.h"
 #include "clang/Basic/DiagnosticOptions.h"
 #include "clang/Basic/ExceptionSpecificationType.h"
 #include "clang/Basic/FileManager.h"
@@ -136,6 +137,15 @@ using namespace clang;
 using namespace clang::serialization;
 using namespace clang::serialization::reader;
 using llvm::BitstreamCursor;
+
+static llvm::SmallString<32> timeString() {
+  llvm::sys::TimePoint<> Timestamp = std::chrono::system_clock::now();
+  llvm::SmallString<32> TimestampStr;
+  llvm::raw_svector_ostream OS(TimestampStr);
+  llvm::format_provider<decltype(Timestamp)>::format(Timestamp, OS, "%Y%m%d%H%M%S%N");
+
+  return TimestampStr;
+}
 
 //===----------------------------------------------------------------------===//
 // ChainedASTReaderListener implementation
@@ -2421,7 +2431,31 @@ InputFile ASTReader::getInputFile(ModuleFile &F, unsigned ID, bool Complain) {
 
       if (!Diags.isDiagnosticInFlight())
         Diag(diag::note_pch_rebuild_required) << TopLevelPCHName;
+    } else {
+// Build a list of the PCH imports that got us here (in reverse).
+      SmallVector<ModuleFile *, 4> ImportStack(1, &F);
+      while (!ImportStack.back()->ImportedBy.empty())
+        ImportStack.push_back(ImportStack.back()->ImportedBy[0]);
+
+      // The top-level PCH is stale.
+      StringRef TopLevelPCHName(ImportStack.back()->FileName);
+      unsigned DiagnosticKind =
+          moduleKindForDiagnostic(ImportStack.back()->Kind);
+      if (DiagnosticKind == 0)
+        Diag(diag::remark_fe_pch_file_modified) << Filename << TopLevelPCHName <<
+              (unsigned)FileChange << timeString();
+      else if (DiagnosticKind == 1)
+        Diag(diag::remark_fe_module_file_modified) << Filename << TopLevelPCHName <<
+              (unsigned)FileChange << timeString();
+      else
+        Diag(diag::remark_fe_ast_file_modified) << Filename << TopLevelPCHName <<
+              (unsigned)FileChange << timeString();
+
+      if (!Diags.isDiagnosticInFlight())
+        Diag(diag::note_pch_rebuild_required) << TopLevelPCHName;
     }
+
+      
 
     IsOutOfDate = true;
   }
@@ -2632,8 +2666,16 @@ ASTReader::ReadControlBlock(ModuleFile &F,
 
         for (unsigned I = 0; I < N; ++I) {
           InputFile IF = getInputFile(F, I+1, Complain);
-          if (!IF.getFile() || IF.isOutOfDate())
+          if (!IF.getFile() || IF.isOutOfDate()) {
+            if ( IF.isOutOfDate() ) {
+              Diag(diag::remark_module_ast_read_control_block_out_of_date) << F.FileName << timeString();
+            }
+            if ( !IF.getFile() ) {
+              Diag(diag::remark_module_ast_read_control_block_no_file) << F.FileName << timeString();
+            }
+            
             return OutOfDate;
+          }
         }
       }
 
@@ -4163,6 +4205,7 @@ ASTReader::ASTReadResult ASTReader::ReadAST(StringRef FileName,
                                             ModuleKind Type,
                                             SourceLocation ImportLoc,
                                             unsigned ClientLoadCapabilities,
+                                            DiagnosticsEngine *FrontendDiags,
                                             SmallVectorImpl<ImportedSubmodule> *Imported) {
   llvm::SaveAndRestore<SourceLocation>
     SetCurImportLocRAII(CurrentImportLoc, ImportLoc);
@@ -4194,15 +4237,27 @@ ASTReader::ASTReadResult ASTReader::ReadAST(StringRef FileName,
   switch (ASTReadResult ReadResult =
               ReadASTCore(FileName, Type, ImportLoc,
                           /*ImportedBy=*/nullptr, Loaded, 0, 0,
-                          ASTFileSignature(), ClientLoadCapabilities)) {
+                          ASTFileSignature(), 
+                          ClientLoadCapabilities,
+                          FrontendDiags)) {
   case Failure:
   case Missing:
   case OutOfDate:
   case VersionMismatch:
   case ConfigurationMismatch:
   case HadErrors:
+    if ( ReadResult == OutOfDate ) {
+      if ( FrontendDiags != nullptr ) {
+        FrontendDiags->Report(ImportLoc, diag::remark_module_ast_remove_out_of_date) << FileName << timeString();
+      }
+    } else {
+      if ( FrontendDiags != nullptr ) {
+        FrontendDiags->Report(ImportLoc, diag::remark_module_ast_remove_other) << FileName << ReadResult << timeString();
+      }
+    }
     return removeModulesAndReturn(ReadResult);
   case Success:
+    Diag(diag::remark_module_ast_load_success) << FileName << timeString();
     break;
   }
 
@@ -4446,14 +4501,17 @@ ASTReader::ReadASTCore(StringRef FileName,
                        SmallVectorImpl<ImportedModule> &Loaded,
                        off_t ExpectedSize, time_t ExpectedModTime,
                        ASTFileSignature ExpectedSignature,
-                       unsigned ClientLoadCapabilities) {
+                       unsigned ClientLoadCapabilities,
+                       DiagnosticsEngine *FrontendDiags) {
   ModuleFile *M;
   std::string ErrorStr;
   ModuleManager::AddModuleResult AddResult
     = ModuleMgr.addModule(FileName, Type, ImportLoc, ImportedBy,
                           getGeneration(), ExpectedSize, ExpectedModTime,
                           ExpectedSignature, readASTFileSignature,
-                          M, ErrorStr);
+                          M,
+                          ErrorStr,
+                          FrontendDiags);
 
   switch (AddResult) {
   case ModuleManager::AlreadyLoaded:
@@ -4548,15 +4606,23 @@ ASTReader::ReadASTCore(StringRef FileName,
             F.ModuleName.empty()) {
           auto Result = (Type == MK_ImplicitModule) ? OutOfDate : Failure;
           if (Result != OutOfDate ||
-              (ClientLoadCapabilities & ARR_OutOfDate) == 0)
+              (ClientLoadCapabilities & ARR_OutOfDate) == 0) {
             Diag(diag::err_module_file_not_module) << FileName;
+          }
+          else {
+            Diag(diag::remark_module_ast_implicit) << FileName;
+          }
+          
           return Result;
         }
         break;
 
       case Failure: return Failure;
       case Missing: return Missing;
-      case OutOfDate: return OutOfDate;
+      case OutOfDate: {
+        Diag(diag::remark_module_ast_control_block_out_of_date) << FileName << timeString();
+        return OutOfDate;
+      }
       case VersionMismatch: return VersionMismatch;
       case ConfigurationMismatch: return ConfigurationMismatch;
       case HadErrors: return HadErrors;

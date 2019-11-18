@@ -206,10 +206,69 @@ def warn_module_config_macro_undef : Warning<
   InGroup<ConfigMacros>;
 def note_module_def_undef_here : Note<
   "macro was %select{defined|#undef'd}0 here">;
-def remark_module_build : Remark<"building module '%0' as '%1'">,
+  
+def remark_module_build : Remark<"building module '%0' as '%1' @ '%2'">,
   InGroup<ModuleBuild>;
-def remark_module_build_done : Remark<"finished building module '%0'">,
+def remark_module_build_done : Remark<"finished building module '%0' @ '%1'">,
   InGroup<ModuleBuild>;
+
+def remark_module_cache_read_success : Remark<"[CompilerInstance::loadModule] successfully read '%0' from the cache @ '%1'">,
+  InGroup<ModuleBuild>;
+def remark_module_source_cache : Remark<"[CompilerInstance::loadModule] Sourcing module '%0' from cache @ '%1'">,
+  InGroup<ModuleBuild>;
+def remark_module_cache_out_of_date : Remark<"[CompilerInstance::loadModule] cached module '%0' was out of date @ '%1'">,
+  InGroup<ModuleBuild>;
+def remark_module_cache_missing : Remark<"[CompilerInstance::loadModule] cached module '%0' was missing @ '%1'">,
+  InGroup<ModuleBuild>;
+
+def remark_module_mgr_file_out_of_date : Remark<"[mgr] module file '%0' out of date">,
+  InGroup<ModuleBuild>;  
+def remark_module_mgr_failed_earlier_import : Remark<"[mgr] module file '%0' failed earlier import">,
+  InGroup<ModuleBuild>;  
+def remark_module_mgr_eager_signature_mismatch : Remark<"[mgr] module file '%0' eager read of signature mismatch">,
+  InGroup<ModuleBuild>;  
+def remark_module_mgr_signature_mismatch : Remark<"[mgr] module file '%0' signature mismatch">,
+  InGroup<ModuleBuild>;  
+
+def remark_fe_pch_file_modified : Remark<
+    "[ASTReader::getInputFile] file '%0' has been modified since the precompiled header '%1' was built"
+    ": %select{size|mtime|content}2 changed @ '%3'">,
+    InGroup<ModuleBuild>;  
+def remark_fe_module_file_modified : Remark<
+    "[ASTReader::getInputFile] file '%0' has been modified since the module file '%1' was built"
+    ": %select{size|mtime|content}2 changed @ '%3'">,
+    InGroup<ModuleBuild>;  
+def remark_fe_ast_file_modified : Remark<
+    "[ASTReader::getInputFile] file '%0' has been modified since the AST file '%1' was built"
+    ": %select{size|mtime|content}2 changed @ '%3'">,
+    InGroup<ModuleBuild>;  
+
+def remark_module_ast_remove_out_of_date : Remark<"[ASTReader::ReadAST] removing out of date module '%0' @ '%1'">,
+  InGroup<ModuleBuild>;  
+def remark_module_ast_remove_other : Remark<"[ASTReader::ReadAST] removing module '%0' for another reason ('%1') @ '%2'">,
+  InGroup<ModuleBuild>;  
+def remark_module_ast_load_success : Remark<"[ASTReader::ReadAST] successfully loaded '%0' @ '%1'">,
+  InGroup<ModuleBuild>;  
+def remark_module_ast_implicit : Remark<"[ast] successful implicit module load '%0'">,
+  InGroup<ModuleBuild>;  
+def remark_module_ast_control_block_out_of_date : Remark<"[ASTReader::ReadASTCore] control block returned out of date '%0' @ '%1'">,
+  InGroup<ModuleBuild>;  
+def remark_module_ast_read_control_block_out_of_date : Remark<"[ASTReader::ReadControlBlock] control block file out of date '%0' @ '%1'">,
+  InGroup<ModuleBuild>;  
+def remark_module_ast_read_control_block_no_file : Remark<"[ASTReader::ReadControlBlock] control block failed to get file '%0' @ '%1'">,
+  InGroup<ModuleBuild>;  
+
+def remark_module_build_tempfile : Remark<"created temp file '%0' for module '%0'">,
+  InGroup<ModuleBuild>;
+def remark_module_responsible_for_build : Remark<"[compileAndLoadModule] taking on responsibility of building '%0' @ '%1'">,
+  InGroup<ModuleBuild>;
+def remark_module_lock_owner_died : Remark<"[compileAndLoadModule] The lock owner died for module '%0' @ '%1'">,
+  InGroup<ModuleBuild>;
+def remark_module_loop_goaround : Remark<"[compileAndLoadModule] Loop iteration '%0' for pid '%1' while compiling/loading module '%2' @ '%3'">,
+  InGroup<ModuleBuild>;
+def remark_module_lock_out_of_date : Remark<"[compileAndLoadModule] Module '%0' (which we waited for another process to build) was marked out of date @ '%1'">,
+  InGroup<ModuleBuild>;
+
 def err_modules_embed_file_not_found :
   Error<"file '%0' specified by '-fmodules-embed-file=' not found">,
   DefaultFatal;

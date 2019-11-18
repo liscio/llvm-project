@@ -50,6 +50,7 @@ public:
   };
 
 private:
+  int RandomWaitTime;
   SmallString<128> FileName;
   SmallString<128> LockFileName;
   SmallString<128> UniqueLockFileName;

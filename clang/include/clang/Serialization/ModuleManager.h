@@ -252,7 +252,8 @@ public:
                             ASTFileSignature ExpectedSignature,
                             ASTFileSignatureReader ReadSignature,
                             ModuleFile *&Module,
-                            std::string &ErrorStr);
+                            std::string &ErrorStr,
+                            clang::DiagnosticsEngine *Diags = nullptr);
 
   /// Remove the modules starting from First (to the end).
   void removeModules(ModuleIterator First, ModuleMap *modMap);

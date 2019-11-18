@@ -23,6 +23,8 @@
 #include "clang/Frontend/FrontendAction.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
+#include <sys/stat.h>
+#include <unistd.h>
 #include "clang/Frontend/LogDiagnosticPrinter.h"
 #include "clang/Frontend/SerializedDiagnosticPrinter.h"
 #include "clang/Frontend/TextDiagnosticPrinter.h"
@@ -52,8 +54,18 @@
 #include "llvm/Support/raw_ostream.h"
 #include <time.h>
 #include <utility>
+#include <iostream>
 
 using namespace clang;
+
+static llvm::SmallString<32> timeString() {
+  llvm::sys::TimePoint<> Timestamp = std::chrono::system_clock::now();
+  llvm::SmallString<32> TimestampStr;
+  llvm::raw_svector_ostream OS(TimestampStr);
+  llvm::format_provider<decltype(Timestamp)>::format(Timestamp, OS, "%Y%m%d%H%M%S%N");
+
+  return TimestampStr;
+}
 
 CompilerInstance::CompilerInstance(
     std::shared_ptr<PCHContainerOperations> PCHContainerOps,
@@ -518,7 +530,7 @@ IntrusiveRefCntPtr<ASTReader> CompilerInstance::createPCHExternalASTSource(
       PP, ModuleCache, &Context, PCHContainerRdr, Extensions,
       Sysroot.empty() ? "" : Sysroot.data(), DisablePCHValidation,
       AllowPCHWithCompilerErrors, /*AllowConfigurationMismatch*/ false,
-      HSOpts.ModulesValidateSystemHeaders, HSOpts.ValidateASTInputFilesContent,
+      HSOpts.ModulesValidateSystemHeaders, true /*HSOpts.ValidateASTInputFilesContent*/,
       UseGlobalModuleIndex));
 
   // We need the external source to be set up before we read the AST, because
@@ -1135,7 +1147,7 @@ compileModuleImpl(CompilerInstance &ImportingInstance, SourceLocation ImportLoc,
 
   ImportingInstance.getDiagnostics().Report(ImportLoc,
                                             diag::remark_module_build)
-    << ModuleName << ModuleFileName;
+    << ModuleName << ModuleFileName << timeString();
 
   PreBuildStep(Instance);
 
@@ -1153,7 +1165,7 @@ compileModuleImpl(CompilerInstance &ImportingInstance, SourceLocation ImportLoc,
 
   ImportingInstance.getDiagnostics().Report(ImportLoc,
                                             diag::remark_module_build_done)
-    << ModuleName;
+    << ModuleName << timeString();
 
   // Delete the temporary module map file.
   // FIXME: Even though we're executing under crash protection, it would still
@@ -1261,7 +1273,12 @@ static bool compileAndLoadModule(CompilerInstance &ImportingInstance,
   StringRef Dir = llvm::sys::path::parent_path(ModuleFileName);
   llvm::sys::fs::create_directories(Dir);
 
+  unsigned LoopIterations = 0;
   while (1) {
+    LoopIterations += 1;
+    Diags.Report(ModuleNameLoc, diag::remark_module_loop_goaround) 
+          << LoopIterations << getpid() << Module->Name  << timeString();
+
     unsigned ModuleLoadCapabilities = ASTReader::ARR_Missing;
     llvm::LockFileManager Locked(ModuleFileName);
     switch (Locked) {
@@ -1275,6 +1292,9 @@ static bool compileAndLoadModule(CompilerInstance &ImportingInstance,
       Locked.unsafeRemoveLockFile();
       LLVM_FALLTHROUGH;
     case llvm::LockFileManager::LFS_Owned:
+      Diags.Report(ModuleNameLoc, diag::remark_module_responsible_for_build) 
+          << Module->Name << timeString();
+    
       // We're responsible for building the module ourselves.
       if (!compileModuleImpl(ImportingInstance, ModuleNameLoc, Module,
                              ModuleFileName)) {
@@ -1291,6 +1311,8 @@ static bool compileAndLoadModule(CompilerInstance &ImportingInstance,
         ModuleLoadCapabilities |= ASTReader::ARR_OutOfDate;
         break;
       case llvm::LockFileManager::Res_OwnerDied:
+      Diags.Report(ModuleNameLoc, diag::remark_module_lock_owner_died) 
+          << Module->Name << timeString();
         continue; // try again to get the lock.
       case llvm::LockFileManager::Res_Timeout:
         // Since ModuleCache takes care of correctness, we try waiting for
@@ -1316,6 +1338,8 @@ static bool compileAndLoadModule(CompilerInstance &ImportingInstance,
       // The module may be out of date in the presence of file system races,
       // or if one of its imports depends on header search paths that are not
       // consistent with this ImportingInstance.  Try again...
+      Diags.Report(ModuleNameLoc, diag::remark_module_lock_out_of_date)
+            << Module->Name << timeString();
       continue;
     } else if (ReadResult == ASTReader::Missing) {
       diagnoseBuildFailure();
@@ -1500,7 +1524,7 @@ void CompilerInstance::createModuleManager() {
         /*AllowASTWithCompilerErrors=*/false,
         /*AllowConfigurationMismatch=*/false,
         HSOpts.ModulesValidateSystemHeaders,
-        HSOpts.ValidateASTInputFilesContent,
+        /*HSOpts.ValidateASTInputFilesContent*/ true,
         getFrontendOpts().UseGlobalModuleIndex, std::move(ReadTimer));
     if (hasASTConsumer()) {
       ModuleManager->setDeserializationListener(
@@ -1719,6 +1743,11 @@ CompilerInstance::loadModule(SourceLocation ImportLoc,
     llvm::TimeRegion TimeLoading(FrontendTimerGroup ? &Timer : nullptr);
     llvm::TimeTraceScope TimeScope("Module Load", ModuleName);
 
+    if ( Source == ModuleCache ) {
+      getDiagnostics().Report(ModuleNameLoc, diag::remark_module_source_cache)
+          << ModuleName << timeString();
+    }
+
     // Try to load the module file. If we are not trying to load from the
     // module cache, we don't know how to rebuild modules.
     unsigned ARRFlags = Source == ModuleCache ?
@@ -1726,13 +1755,14 @@ CompilerInstance::loadModule(SourceLocation ImportLoc,
                         Source == PrebuiltModulePath ?
                             0 :
                             ASTReader::ARR_ConfigurationMismatch;
-    switch (ModuleManager->ReadAST(ModuleFileName,
+    clang::ASTReader::ASTReadResult readResult = ModuleManager->ReadAST(ModuleFileName,
                                    Source == PrebuiltModulePath
                                        ? serialization::MK_PrebuiltModule
                                        : Source == ModuleBuildPragma
                                              ? serialization::MK_ExplicitModule
                                              : serialization::MK_ImplicitModule,
-                                   ImportLoc, ARRFlags)) {
+                                   ImportLoc, ARRFlags, Diagnostics.get());
+    switch (readResult) {
     case ASTReader::Success: {
       if (Source != ModuleCache && !Module) {
         Module = PP->getHeaderSearchInfo().lookupModule(ModuleName, true,
@@ -1748,6 +1778,9 @@ CompilerInstance::loadModule(SourceLocation ImportLoc,
           MM.cacheModuleLoad(*Path[0].first, nullptr);
           return ModuleLoadResult();
         }
+      } else {
+        getDiagnostics().Report(ModuleNameLoc, diag::remark_module_cache_read_success)
+          << ModuleName << timeString();
       }
       break;
     }
@@ -1761,6 +1794,14 @@ CompilerInstance::loadModule(SourceLocation ImportLoc,
         ModuleBuildFailed = true;
         MM.cacheModuleLoad(*Path[0].first, nullptr);
         return ModuleLoadResult();
+      } else {
+        if ( readResult == ASTReader::OutOfDate ) {
+          getDiagnostics().Report(ModuleNameLoc, diag::remark_module_cache_out_of_date)
+              << ModuleName << timeString();
+        } else {
+          getDiagnostics().Report(ModuleNameLoc, diag::remark_module_cache_missing)
+              << ModuleName << timeString();
+        }
       }
 
       // The module file is missing or out-of-date. Build it.
@@ -2002,6 +2043,10 @@ void CompilerInstance::loadModuleFromSource(SourceLocation ImportLoc,
         << ModuleFileName << EC.message();
     return;
   }
+
+   getDiagnostics().Report(ImportLoc, diag::remark_module_build_tempfile)
+      << ModuleFileName << ModuleName;
+    
   std::string ModuleMapFileName = (CleanModuleName + ".map").str();
 
   FrontendInputFile Input(

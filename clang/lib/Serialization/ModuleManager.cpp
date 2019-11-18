@@ -13,6 +13,9 @@
 
 #include "clang/Serialization/ModuleManager.h"
 #include "clang/Basic/FileManager.h"
+#include "clang/Basic/DiagnosticFrontend.h"
+#include "clang/Basic/Diagnostic.h"
+#include "clang/Basic/DiagnosticOptions.h"
 #include "clang/Basic/LLVM.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/ModuleMap.h"
@@ -107,7 +110,8 @@ ModuleManager::addModule(StringRef FileName, ModuleKind Type,
                          ASTFileSignature ExpectedSignature,
                          ASTFileSignatureReader ReadSignature,
                          ModuleFile *&Module,
-                         std::string &ErrorStr) {
+                         std::string &ErrorStr,
+                         DiagnosticsEngine *Diags) {
   Module = nullptr;
 
   // Look for the file entry. This only fails if the expected size or
@@ -124,6 +128,9 @@ ModuleManager::addModule(StringRef FileName, ModuleKind Type,
   // when using an ASTFileSignature.
   if (lookupModuleFile(FileName, ExpectedSize, ExpectedModTime, Entry)) {
     ErrorStr = "module file out of date";
+    if (Diags != nullptr) {
+      Diags->Report(ImportLoc, diag::remark_module_mgr_file_out_of_date) << FileName;
+    }
     return OutOfDate;
   }
 
@@ -135,8 +142,12 @@ ModuleManager::addModule(StringRef FileName, ModuleKind Type,
   // Check whether we already loaded this module, before
   if (ModuleFile *ModuleEntry = Modules.lookup(Entry)) {
     // Check the stored signature.
-    if (checkSignature(ModuleEntry->Signature, ExpectedSignature, ErrorStr))
+    if (checkSignature(ModuleEntry->Signature, ExpectedSignature, ErrorStr)) {
+      if (Diags != nullptr) {
+        Diags->Report(ImportLoc, diag::remark_module_mgr_signature_mismatch) << FileName;
+      }
       return OutOfDate;
+    }
 
     Module = ModuleEntry;
     updateModuleImports(*ModuleEntry, ImportedBy, ImportLoc);
@@ -177,6 +188,9 @@ ModuleManager::addModule(StringRef FileName, ModuleKind Type,
     // Report that the module is out of date, since we tried (and failed) to
     // import it earlier.
     Entry->closeFile();
+    if (Diags != nullptr) {
+    Diags->Report(ImportLoc, diag::remark_module_mgr_failed_earlier_import) << FileName;
+    }
     return OutOfDate;
   } else {
     // Open the AST file.
@@ -202,8 +216,12 @@ ModuleManager::addModule(StringRef FileName, ModuleKind Type,
   // Read the signature eagerly now so that we can check it.  Avoid calling
   // ReadSignature unless there's something to check though.
   if (ExpectedSignature && checkSignature(ReadSignature(NewModule->Data),
-                                          ExpectedSignature, ErrorStr))
+                                          ExpectedSignature, ErrorStr)) {
+    if (Diags != nullptr) {
+      Diags->Report(ImportLoc, diag::remark_module_mgr_eager_signature_mismatch) << FileName;
+    }
     return OutOfDate;
+  }
 
   // We're keeping this module.  Store it everywhere.
   Module = Modules[Entry] = NewModule.get();

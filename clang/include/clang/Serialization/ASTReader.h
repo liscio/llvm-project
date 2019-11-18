@@ -1277,7 +1277,8 @@ private:
                             SmallVectorImpl<ImportedModule> &Loaded,
                             off_t ExpectedSize, time_t ExpectedModTime,
                             ASTFileSignature ExpectedSignature,
-                            unsigned ClientLoadCapabilities);
+                            unsigned ClientLoadCapabilities,
+                            DiagnosticsEngine *FrontendDiags = nullptr);
   ASTReadResult ReadControlBlock(ModuleFile &F,
                                  SmallVectorImpl<ImportedModule> &Loaded,
                                  const ModuleFile *ImportedBy,
@@ -1549,6 +1550,7 @@ public:
   ASTReadResult ReadAST(StringRef FileName, ModuleKind Type,
                         SourceLocation ImportLoc,
                         unsigned ClientLoadCapabilities,
+                        DiagnosticsEngine *FrontendDiags = nullptr,
                         SmallVectorImpl<ImportedSubmodule> *Imported = nullptr);
 
   /// Make the entities in the given module and any of its (non-explicit)

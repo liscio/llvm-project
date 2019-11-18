@@ -23,6 +23,7 @@
 #include <sys/types.h>
 #include <system_error>
 #include <tuple>
+#include <random>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -165,6 +166,11 @@ LockFileManager::LockFileManager(StringRef FileName)
   LockFileName = this->FileName;
   LockFileName += ".lock";
 
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_int_distribution<> dis(1, 100);
+  this->RandomWaitTime = dis(gen);
+
   // If the lock file already exists, don't bother to try to create our own
   // lock file; it won't work anyway. Just figure out who owns this lock file.
   if ((Owner = readLockFile(LockFileName)))
@@ -295,11 +301,11 @@ LockFileManager::WaitForUnlockResult LockFileManager::waitForUnlock() {
     return Res_Success;
 
 #ifdef _WIN32
-  unsigned long Interval = 1;
+  unsigned long Interval = 1 * RandomWaitTime;
 #else
   struct timespec Interval;
   Interval.tv_sec = 0;
-  Interval.tv_nsec = 1000000;
+  Interval.tv_nsec = 1000000 * this->RandomWaitTime;
 #endif
   // Don't wait more than 40s per iteration. Total timeout for the file
   // to appear is ~1.5 minutes.
