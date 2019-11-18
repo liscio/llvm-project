@@ -1,104 +1,286 @@
-# The LLVM Compiler Infrastructure
+# A hacked-up, totally-not-safe-for-upstream LLVM fork
 
-This directory and its subdirectories contain source code for LLVM,
-a toolkit for the construction of highly optimized compilers,
-optimizers, and runtime environments.
+I found a very weird performance regression bug in Xcode that has been driving
+me crazy for months. _So crazy_ that I started messing with `clang` myself to
+see if I could figure out what's going on.
 
-## Getting Started with the LLVM System
+You can find the bug demonstrated in [liscio/SubFrameworks](https://github.com/liscio/SubFrameworks).
 
-Taken from https://llvm.org/docs/GettingStarted.html.
+## How to use this fork/branch?
 
-### Overview
+If you're interested in playing along, here's how I got everything going:
 
-Welcome to the LLVM project!
+``` bash
+# In some working folder, grab this branch/fork
+git clone https://github.com/liscio/llvm-project
+cd llvm-project
+git checkout cl-more-module-remarks
 
-The LLVM project has multiple components. The core of the project is
-itself called "LLVM". This contains all of the tools, libraries, and header
-files needed to process intermediate representations and converts it into
-object files.  Tools include an assembler, disassembler, bitcode analyzer, and
-bitcode optimizer.  It also contains basic regression tests.
+# Now, create a build folder to work in
+mkdir build
+cd build
 
-C-like languages use the [Clang](http://clang.llvm.org/) front end.  This
-component compiles C, C++, Objective C, and Objective C++ code into LLVM bitcode
--- and from there into object files, using LLVM.
+# Run cmake
+cmake -G 'Unix Makefiles' \
+    -DLLVM_ENABLE_PROJECTS="clang;libcxx;libcxxabi" \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLLVM_CREATE_XCODE_TOOLCHAIN=ON \
+    ../llvm
 
-Other components include:
-the [libc++ C++ standard library](https://libcxx.llvm.org),
-the [LLD linker](https://lld.llvm.org), and more.
+# Build the Xcode toolchain
+make -j40 install-xcode-toolchain
 
-### Getting the Source Code and Building LLVM
+# Create a symlink so Xcode can see the new toolchain
+sudo ln -s /usr/local/Toolchains/LLVM10.0.0git.xctoolchain /Library/Developer/Toolchains/LLVM10.0.0git.xctoolchain
 
-The LLVM Getting Started documentation may be out of date.  The [Clang
-Getting Started](http://clang.llvm.org/get_started.html) page might have more
-accurate information.
 
-This is an example workflow and configuration to get and build the LLVM source:
+```
 
-1. Checkout LLVM (including related subprojects like Clang):
+## Using the custom toolchain
 
-     * ``git clone https://github.com/llvm/llvm-project.git``
+With `xcodebuild`, you can specify this toolchain at the command-line to avoid conflicts with your normal Xcode working setup.
 
-     * Or, on windows, ``git clone --config core.autocrlf=false
-    https://github.com/llvm/llvm-project.git``
+For instance, using my reproducing test case, you can run this:
 
-2. Configure and build LLVM and Clang:
+``` bash
+xcodebuild -scheme MainFramework -derivedDataPath testDerivedData \
+  -toolchain LLVM10.0.0git clean build \
+  COMPILER_INDEX_STORE_ENABLE=0
+```
 
-     * ``cd llvm-project``
+The key bits are specifying the `-toolchain`, and
+`COMPILER_INDEX_STORE_ENABLE=0`. The latter works around the fact that Xcode
+relies on Apple's own fork of `clang` which has some slight differences of its
+own.
 
-     * ``mkdir build``
+## Filtering the output
 
-     * ``cd build``
+I slapped timestamps on the remarks so that you could see how multiple `clang`
+processes are contending with one another for access to the module cache.
 
-     * ``cmake -G <generator> [options] ../llvm``
+To get usable output, I have been relying on my Vim-fu and using the following
+commands:
 
-        Some common generators are:
+```
+g!/remark/d
+```
 
-        * ``Ninja`` --- for generating [Ninja](https://ninja-build.org)
-          build files. Most llvm developers use Ninja.
-        * ``Unix Makefiles`` --- for generating make-compatible parallel makefiles.
-        * ``Visual Studio`` --- for generating Visual Studio projects and
-          solutions.
-        * ``Xcode`` --- for generating Xcode projects.
+This only shows the remarks.
 
-        Some Common options:
+```
+%s/\(.*\) @ '\(\d\+\)'/\2 \1/g
+```
 
-        * ``-DLLVM_ENABLE_PROJECTS='...'`` --- semicolon-separated list of the LLVM
-          subprojects you'd like to additionally build. Can include any of: clang,
-          clang-tools-extra, libcxx, libcxxabi, libunwind, lldb, compiler-rt, lld,
-          polly, or debuginfo-tests.
+This puts the timestamp at the beginning of each line.
 
-          For example, to build LLVM, Clang, libcxx, and libcxxabi, use
-          ``-DLLVM_ENABLE_PROJECTS="clang;libcxx;libcxxabi"``.
+```
+%sort
+```
 
-        * ``-DCMAKE_INSTALL_PREFIX=directory`` --- Specify for *directory* the full
-          pathname of where you want the LLVM tools and libraries to be installed
-          (default ``/usr/local``).
+And this sorts the line in the file.
 
-        * ``-DCMAKE_BUILD_TYPE=type`` --- Valid options for *type* are Debug,
-          Release, RelWithDebInfo, and MinSizeRel. Default is Debug.
+(Yes, I could probably chain these together using `sed`, but I've already spent
+enough time on this. :P)
 
-        * ``-DLLVM_ENABLE_ASSERTIONS=On`` --- Compile with assertion checks enabled
-          (default is Yes for Debug builds, No for all other build types).
+## Sample Output
 
-      * Run your build tool of choice!
+This is further filtered to aid readability, but the following contains output
+from my sample project.
 
-        * The default target (i.e. ``ninja`` or ``make``) will build all of LLVM.
+In a nutshell, it looks like all the `clang` processes find the dirtied module
+in the cache (because of the clean rebuild). Then, they fight for the right to
+build the new item in the cache.
 
-        * The ``check-all`` target (i.e. ``ninja check-all``) will run the
-          regression tests to ensure everything is in working order.
+The first process wins the lock, and starts building the module.
 
-        * CMake will generate build targets for each tool and library, and most
-          LLVM sub-projects generate their own ``check-<project>`` target.
+The next process comes along, but when it loads the just-built module, it is
+mis-identified as dirty!
 
-        * Running a serial build will be *slow*.  To improve speed, try running a
-          parallel build. That's done by default in Ninja; for ``make``, use
-          ``make -j NNN`` (NNN is the number of parallel jobs, use e.g. number of
-          CPUs you have.)
+This repeats for each `clang` invocation that depends on the same module. Ugh.
 
-      * For more information see [CMake](https://llvm.org/docs/CMake.html)
+```
+20191118112954791694000 SubFrameworks/SubC.h:9:9: remark: [CompilerInstance::loadModule] Sourcing module 'Foundation' from cache [-Rmodule-build]
+20191118112954792319000 SubFrameworks/SubA.h:9:9: remark: [CompilerInstance::loadModule] Sourcing module 'Foundation' from cache [-Rmodule-build]
+20191118112954792519000 SubFrameworks/SubB.h:9:9: remark: [CompilerInstance::loadModule] Sourcing module 'Foundation' from cache [-Rmodule-build]
+20191118112954841476000 SubFrameworks/SubA.h:9:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/Foundation-2PSPYZLNW14KI.pcm' [-Rmodule-build]
+20191118112954841521000 SubFrameworks/SubB.h:9:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/Foundation-2PSPYZLNW14KI.pcm' [-Rmodule-build]
+20191118112954841526000 SubFrameworks/SubC.h:9:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/Foundation-2PSPYZLNW14KI.pcm' [-Rmodule-build]
+20191118112954859879000 SubFrameworks/SubC.h:9:9: remark: [CompilerInstance::loadModule] successfully read 'Foundation' from the cache [-Rmodule-build]
+20191118112954860010000 SubFrameworks/SubB.h:9:9: remark: [CompilerInstance::loadModule] successfully read 'Foundation' from the cache [-Rmodule-build]
+20191118112954860233000 SubFrameworks/SubA.h:9:9: remark: [CompilerInstance::loadModule] successfully read 'Foundation' from the cache [-Rmodule-build]
+20191118112954996015000 MainFramework/MainB.h:9:9: remark: [CompilerInstance::loadModule] Sourcing module 'Foundation' from cache [-Rmodule-build]
+20191118112954997451000 MainFramework/MainD.h:9:9: remark: [CompilerInstance::loadModule] Sourcing module 'Foundation' from cache [-Rmodule-build]
+20191118112954997610000 MainFramework/MainG.h:9:9: remark: [CompilerInstance::loadModule] Sourcing module 'Foundation' from cache [-Rmodule-build]
+20191118112954998312000 MainFramework/MainF.h:9:9: remark: [CompilerInstance::loadModule] Sourcing module 'Foundation' from cache [-Rmodule-build]
+20191118112954999188000 MainFramework/MainA.h:9:9: remark: [CompilerInstance::loadModule] Sourcing module 'Foundation' from cache [-Rmodule-build]
+20191118112954999794000 MainFramework/MainE.h:9:9: remark: [CompilerInstance::loadModule] Sourcing module 'Foundation' from cache [-Rmodule-build]
+20191118112955120641000 MainFramework/MainB.h:10:9: remark: finished building module 'SubFrameworks' [-Rmodule-build]
+20191118112955122549000 MainFramework/MainB.h:10:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+20191118112955125256000 MainFramework/MainG.h:10:9: remark: [compileAndLoadModule] Module 'SubFrameworks' (which we waited for another process to build) was marked out of date [-Rmodule-build]
+20191118112955125290000 MainFramework/MainG.h:10:9: remark: [compileAndLoadModule] Loop iteration '2' for pid '90724' while compiling/loading module 'SubFrameworks' [-Rmodule-build]
+20191118112955125584000 MainFramework/MainG.h:10:9: remark: [compileAndLoadModule] taking on responsibility of building 'SubFrameworks' [-Rmodule-build]
+20191118112955125728000 MainFramework/MainG.h:10:9: remark: building module 'SubFrameworks' as 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+20191118112955127248000 SubFrameworks/SubFrameworks.h:9:9: remark: [CompilerInstance::loadModule] Sourcing module 'Foundation' from cache [-Rmodule-build]
+20191118112955133979000 SubFrameworks/SubFrameworks.h:9:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/Foundation-2PSPYZLNW14KI.pcm' [-Rmodule-build]
+20191118112955149600000 SubFrameworks/SubFrameworks.h:9:9: remark: [CompilerInstance::loadModule] successfully read 'Foundation' from the cache [-Rmodule-build]
+20191118112955171072000 MainFramework/MainG.h:10:9: remark: finished building module 'SubFrameworks' [-Rmodule-build]
+20191118112955173989000 MainFramework/MainG.h:10:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+20191118112955178635000 MainFramework/MainE.h:10:9: remark: [compileAndLoadModule] Module 'SubFrameworks' (which we waited for another process to build) was marked out of date [-Rmodule-build]
+20191118112955178672000 MainFramework/MainE.h:10:9: remark: [compileAndLoadModule] Loop iteration '2' for pid '90727' while compiling/loading module 'SubFrameworks' [-Rmodule-build]
+20191118112955179067000 MainFramework/MainE.h:10:9: remark: [compileAndLoadModule] taking on responsibility of building 'SubFrameworks' [-Rmodule-build]
+20191118112955179227000 MainFramework/MainE.h:10:9: remark: building module 'SubFrameworks' as 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+20191118112955180907000 SubFrameworks/SubFrameworks.h:9:9: remark: [CompilerInstance::loadModule] Sourcing module 'Foundation' from cache [-Rmodule-build]
+20191118112955187664000 SubFrameworks/SubFrameworks.h:9:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/Foundation-2PSPYZLNW14KI.pcm' [-Rmodule-build]
+20191118112955202886000 SubFrameworks/SubFrameworks.h:9:9: remark: [CompilerInstance::loadModule] successfully read 'Foundation' from the cache [-Rmodule-build]
+20191118112955220128000 MainFramework/MainD.h:10:9: remark: [compileAndLoadModule] The lock owner died for module 'SubFrameworks' [-Rmodule-build]
+20191118112955220166000 MainFramework/MainD.h:10:9: remark: [compileAndLoadModule] Loop iteration '2' for pid '90723' while compiling/loading module 'SubFrameworks' [-Rmodule-build]
+20191118112955223613000 MainFramework/MainE.h:10:9: remark: finished building module 'SubFrameworks' [-Rmodule-build]
+20191118112955225891000 MainFramework/MainE.h:10:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+20191118112955228772000 MainFramework/MainD.h:10:9: remark: [compileAndLoadModule] Module 'SubFrameworks' (which we waited for another process to build) was marked out of date [-Rmodule-build]
+20191118112955228804000 MainFramework/MainD.h:10:9: remark: [compileAndLoadModule] Loop iteration '3' for pid '90723' while compiling/loading module 'SubFrameworks' [-Rmodule-build]
+20191118112955229090000 MainFramework/MainD.h:10:9: remark: [compileAndLoadModule] taking on responsibility of building 'SubFrameworks' [-Rmodule-build]
+20191118112955229228000 MainFramework/MainD.h:10:9: remark: building module 'SubFrameworks' as 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+20191118112955230801000 SubFrameworks/SubFrameworks.h:9:9: remark: [CompilerInstance::loadModule] Sourcing module 'Foundation' from cache [-Rmodule-build]
+20191118112955237161000 SubFrameworks/SubFrameworks.h:9:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/Foundation-2PSPYZLNW14KI.pcm' [-Rmodule-build]
+20191118112955243649000 MainFramework/MainC.h:10:9: remark: [compileAndLoadModule] The lock owner died for module 'SubFrameworks' [-Rmodule-build]
+20191118112955243689000 MainFramework/MainC.h:10:9: remark: [compileAndLoadModule] Loop iteration '2' for pid '90728' while compiling/loading module 'SubFrameworks' [-Rmodule-build]
+20191118112955251529000 SubFrameworks/SubFrameworks.h:9:9: remark: [CompilerInstance::loadModule] successfully read 'Foundation' from the cache [-Rmodule-build]
+20191118112955258655000 MainFramework/MainA.h:10:9: remark: [compileAndLoadModule] The lock owner died for module 'SubFrameworks' [-Rmodule-build]
+20191118112955258694000 MainFramework/MainA.h:10:9: remark: [compileAndLoadModule] Loop iteration '2' for pid '90726' while compiling/loading module 'SubFrameworks' [-Rmodule-build]
+20191118112955272420000 MainFramework/MainD.h:10:9: remark: finished building module 'SubFrameworks' [-Rmodule-build]
+20191118112955274820000 MainFramework/MainD.h:10:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+20191118112955306748000 MainFramework/MainA.h:10:9: remark: [compileAndLoadModule] Module 'SubFrameworks' (which we waited for another process to build) was marked out of date [-Rmodule-build]
+20191118112955306785000 MainFramework/MainA.h:10:9: remark: [compileAndLoadModule] Loop iteration '3' for pid '90726' while compiling/loading module 'SubFrameworks' [-Rmodule-build]
+20191118112955307094000 MainFramework/MainA.h:10:9: remark: [compileAndLoadModule] taking on responsibility of building 'SubFrameworks' [-Rmodule-build]
+20191118112955307235000 MainFramework/MainA.h:10:9: remark: building module 'SubFrameworks' as 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+20191118112955308928000 SubFrameworks/SubFrameworks.h:9:9: remark: [CompilerInstance::loadModule] Sourcing module 'Foundation' from cache [-Rmodule-build]
+20191118112955315252000 SubFrameworks/SubFrameworks.h:9:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/Foundation-2PSPYZLNW14KI.pcm' [-Rmodule-build]
+20191118112955315474000 MainFramework/MainF.h:10:9: remark: [compileAndLoadModule] The lock owner died for module 'SubFrameworks' [-Rmodule-build]
+20191118112955315513000 MainFramework/MainF.h:10:9: remark: [compileAndLoadModule] Loop iteration '2' for pid '90725' while compiling/loading module 'SubFrameworks' [-Rmodule-build]
+20191118112955325327000 MainFramework/MainC.h:10:9: remark: [compileAndLoadModule] The lock owner died for module 'SubFrameworks' [-Rmodule-build]
+20191118112955325366000 MainFramework/MainC.h:10:9: remark: [compileAndLoadModule] Loop iteration '3' for pid '90728' while compiling/loading module 'SubFrameworks' [-Rmodule-build]
+20191118112955329311000 SubFrameworks/SubFrameworks.h:9:9: remark: [CompilerInstance::loadModule] successfully read 'Foundation' from the cache [-Rmodule-build]
+20191118112955349386000 MainFramework/MainA.h:10:9: remark: finished building module 'SubFrameworks' [-Rmodule-build]
+20191118112955351444000 MainFramework/MainA.h:10:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+20191118112955353470000 MainFramework/MainF.h:10:9: remark: [compileAndLoadModule] Module 'SubFrameworks' (which we waited for another process to build) was marked out of date [-Rmodule-build]
+20191118112955353502000 MainFramework/MainF.h:10:9: remark: [compileAndLoadModule] Loop iteration '3' for pid '90725' while compiling/loading module 'SubFrameworks' [-Rmodule-build]
+20191118112955353784000 MainFramework/MainF.h:10:9: remark: [compileAndLoadModule] taking on responsibility of building 'SubFrameworks' [-Rmodule-build]
+20191118112955353924000 MainFramework/MainF.h:10:9: remark: building module 'SubFrameworks' as 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+20191118112955355357000 SubFrameworks/SubFrameworks.h:9:9: remark: [CompilerInstance::loadModule] Sourcing module 'Foundation' from cache [-Rmodule-build]
+20191118112955361820000 SubFrameworks/SubFrameworks.h:9:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/Foundation-2PSPYZLNW14KI.pcm' [-Rmodule-build]
+20191118112955377044000 SubFrameworks/SubFrameworks.h:9:9: remark: [CompilerInstance::loadModule] successfully read 'Foundation' from the cache [-Rmodule-build]
+20191118112955398247000 MainFramework/MainF.h:10:9: remark: finished building module 'SubFrameworks' [-Rmodule-build]
+20191118112955400540000 MainFramework/MainF.h:10:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+20191118112955534232000 MainFramework/MainC.h:10:9: remark: [compileAndLoadModule] Module 'SubFrameworks' (which we waited for another process to build) was marked out of date [-Rmodule-build]
+20191118112955534298000 MainFramework/MainC.h:10:9: remark: [compileAndLoadModule] Loop iteration '4' for pid '90728' while compiling/loading module 'SubFrameworks' [-Rmodule-build]
+20191118112955534763000 MainFramework/MainC.h:10:9: remark: [compileAndLoadModule] taking on responsibility of building 'SubFrameworks' [-Rmodule-build]
+20191118112955534977000 MainFramework/MainC.h:10:9: remark: building module 'SubFrameworks' as 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+20191118112955536652000 SubFrameworks/SubFrameworks.h:9:9: remark: [CompilerInstance::loadModule] Sourcing module 'Foundation' from cache [-Rmodule-build]
+20191118112955542624000 SubFrameworks/SubFrameworks.h:9:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/Foundation-2PSPYZLNW14KI.pcm' [-Rmodule-build]
+2019111811295554376000 MainFramework/MainB.h:9:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/Foundation-2PSPYZLNW14KI.pcm' [-Rmodule-build]
+20191118112955557052000 SubFrameworks/SubFrameworks.h:9:9: remark: [CompilerInstance::loadModule] successfully read 'Foundation' from the cache [-Rmodule-build]
+2019111811295556048000 MainFramework/MainD.h:9:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/Foundation-2PSPYZLNW14KI.pcm' [-Rmodule-build]
+2019111811295556588000 MainFramework/MainG.h:9:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/Foundation-2PSPYZLNW14KI.pcm' [-Rmodule-build]
+2019111811295556820000 MainFramework/MainA.h:9:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/Foundation-2PSPYZLNW14KI.pcm' [-Rmodule-build]
+2019111811295557255000 MainFramework/MainF.h:9:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/Foundation-2PSPYZLNW14KI.pcm' [-Rmodule-build]
+20191118112955576951000 MainFramework/MainC.h:10:9: remark: finished building module 'SubFrameworks' [-Rmodule-build]
+2019111811295557773000 MainFramework/MainE.h:9:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/Foundation-2PSPYZLNW14KI.pcm' [-Rmodule-build]
+20191118112955579030000 MainFramework/MainC.h:10:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295558081000 MainFramework/MainC.h:9:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/Foundation-2PSPYZLNW14KI.pcm' [-Rmodule-build]
+20191118112955679000 MainFramework/MainC.h:9:9: remark: [CompilerInstance::loadModule] Sourcing module 'Foundation' from cache [-Rmodule-build]
+2019111811295571834000 MainFramework/MainB.h:9:9: remark: [CompilerInstance::loadModule] successfully read 'Foundation' from the cache [-Rmodule-build]
+2019111811295572725000 MainFramework/MainB.h:10:9: remark: [CompilerInstance::loadModule] Sourcing module 'SubFrameworks' from cache [-Rmodule-build]
+2019111811295573106000 MainFramework/MainB.h:10:2: remark: [ASTReader::getInputFile] file 'testDerivedData/Build/Intermediates.noindex/SubFrameworks.build/Debug/SubFrameworks.build/module.modulemap' has been modified since the module file 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' was built: mtime changed [-Rmodule-build]
+2019111811295573165000 MainFramework/MainB.h:10:2: remark: [ASTReader::ReadControlBlock] control block file out of date 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295573198000 MainFramework/MainB.h:10:2: remark: [ASTReader::ReadASTCore] control block returned out of date 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295573234000 MainFramework/MainB.h:10:2: remark: [ASTReader::ReadAST] removing out of date module 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295573298000 MainFramework/MainB.h:10:9: remark: [CompilerInstance::loadModule] cached module 'SubFrameworks' was out of date [-Rmodule-build]
+2019111811295573376000 MainFramework/MainB.h:10:9: remark: [compileAndLoadModule] Loop iteration '1' for pid '90722' while compiling/loading module 'SubFrameworks' [-Rmodule-build]
+2019111811295574351000 MainFramework/MainB.h:10:9: remark: [compileAndLoadModule] taking on responsibility of building 'SubFrameworks' [-Rmodule-build]
+2019111811295574546000 MainFramework/MainB.h:10:9: remark: building module 'SubFrameworks' as 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295576739000 SubFrameworks/SubFrameworks.h:9:9: remark: [CompilerInstance::loadModule] Sourcing module 'Foundation' from cache [-Rmodule-build]
+2019111811295577513000 MainFramework/MainD.h:9:9: remark: [CompilerInstance::loadModule] successfully read 'Foundation' from the cache [-Rmodule-build]
+2019111811295578408000 MainFramework/MainD.h:10:9: remark: [CompilerInstance::loadModule] Sourcing module 'SubFrameworks' from cache [-Rmodule-build]
+2019111811295578761000 MainFramework/MainD.h:10:2: remark: [ASTReader::getInputFile] file 'testDerivedData/Build/Intermediates.noindex/SubFrameworks.build/Debug/SubFrameworks.build/module.modulemap' has been modified since the module file 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' was built: mtime changed [-Rmodule-build]
+2019111811295578812000 MainFramework/MainD.h:10:2: remark: [ASTReader::ReadControlBlock] control block file out of date 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295578868000 MainFramework/MainD.h:10:2: remark: [ASTReader::ReadASTCore] control block returned out of date 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295578922000 MainFramework/MainD.h:10:2: remark: [ASTReader::ReadAST] removing out of date module 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295578972000 MainFramework/MainD.h:10:9: remark: [CompilerInstance::loadModule] cached module 'SubFrameworks' was out of date [-Rmodule-build]
+2019111811295579030000 MainFramework/MainD.h:10:9: remark: [compileAndLoadModule] Loop iteration '1' for pid '90723' while compiling/loading module 'SubFrameworks' [-Rmodule-build]
+2019111811295579064000 MainFramework/MainG.h:9:9: remark: [CompilerInstance::loadModule] successfully read 'Foundation' from the cache [-Rmodule-build]
+2019111811295579407000 MainFramework/MainA.h:9:9: remark: [CompilerInstance::loadModule] successfully read 'Foundation' from the cache [-Rmodule-build]
+2019111811295580057000 MainFramework/MainG.h:10:9: remark: [CompilerInstance::loadModule] Sourcing module 'SubFrameworks' from cache [-Rmodule-build]
+2019111811295580337000 MainFramework/MainA.h:10:9: remark: [CompilerInstance::loadModule] Sourcing module 'SubFrameworks' from cache [-Rmodule-build]
+2019111811295580409000 MainFramework/MainF.h:9:9: remark: [CompilerInstance::loadModule] successfully read 'Foundation' from the cache [-Rmodule-build]
+2019111811295580445000 MainFramework/MainG.h:10:2: remark: [ASTReader::getInputFile] file 'testDerivedData/Build/Intermediates.noindex/SubFrameworks.build/Debug/SubFrameworks.build/module.modulemap' has been modified since the module file 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' was built: mtime changed [-Rmodule-build]
+2019111811295580511000 MainFramework/MainG.h:10:2: remark: [ASTReader::ReadControlBlock] control block file out of date 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295580542000 MainFramework/MainG.h:10:2: remark: [ASTReader::ReadASTCore] control block returned out of date 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295580573000 MainFramework/MainG.h:10:2: remark: [ASTReader::ReadAST] removing out of date module 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295580628000 MainFramework/MainG.h:10:9: remark: [CompilerInstance::loadModule] cached module 'SubFrameworks' was out of date [-Rmodule-build]
+2019111811295580684000 MainFramework/MainG.h:10:9: remark: [compileAndLoadModule] Loop iteration '1' for pid '90724' while compiling/loading module 'SubFrameworks' [-Rmodule-build]
+2019111811295580724000 MainFramework/MainA.h:10:2: remark: [ASTReader::getInputFile] file 'testDerivedData/Build/Intermediates.noindex/SubFrameworks.build/Debug/SubFrameworks.build/module.modulemap' has been modified since the module file 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' was built: mtime changed [-Rmodule-build]
+2019111811295580789000 MainFramework/MainA.h:10:2: remark: [ASTReader::ReadControlBlock] control block file out of date 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295580803000 MainFramework/MainE.h:9:9: remark: [CompilerInstance::loadModule] successfully read 'Foundation' from the cache [-Rmodule-build]
+2019111811295580825000 MainFramework/MainA.h:10:2: remark: [ASTReader::ReadASTCore] control block returned out of date 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295580862000 MainFramework/MainA.h:10:2: remark: [ASTReader::ReadAST] removing out of date module 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295580913000 MainFramework/MainA.h:10:9: remark: [CompilerInstance::loadModule] cached module 'SubFrameworks' was out of date [-Rmodule-build]
+2019111811295580927000 MainFramework/MainC.h:9:9: remark: [CompilerInstance::loadModule] successfully read 'Foundation' from the cache [-Rmodule-build]
+2019111811295580969000 MainFramework/MainA.h:10:9: remark: [compileAndLoadModule] Loop iteration '1' for pid '90726' while compiling/loading module 'SubFrameworks' [-Rmodule-build]
+2019111811295581292000 MainFramework/MainF.h:10:9: remark: [CompilerInstance::loadModule] Sourcing module 'SubFrameworks' from cache [-Rmodule-build]
+2019111811295581665000 MainFramework/MainF.h:10:2: remark: [ASTReader::getInputFile] file 'testDerivedData/Build/Intermediates.noindex/SubFrameworks.build/Debug/SubFrameworks.build/module.modulemap' has been modified since the module file 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' was built: mtime changed [-Rmodule-build]
+2019111811295581731000 MainFramework/MainF.h:10:2: remark: [ASTReader::ReadControlBlock] control block file out of date 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295581732000 MainFramework/MainE.h:10:9: remark: [CompilerInstance::loadModule] Sourcing module 'SubFrameworks' from cache [-Rmodule-build]
+2019111811295581763000 MainFramework/MainF.h:10:2: remark: [ASTReader::ReadASTCore] control block returned out of date 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295581767000 MainFramework/MainC.h:10:9: remark: [CompilerInstance::loadModule] Sourcing module 'SubFrameworks' from cache [-Rmodule-build]
+2019111811295581819000 MainFramework/MainF.h:10:2: remark: [ASTReader::ReadAST] removing out of date module 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295581881000 MainFramework/MainF.h:10:9: remark: [CompilerInstance::loadModule] cached module 'SubFrameworks' was out of date [-Rmodule-build]
+2019111811295581946000 MainFramework/MainF.h:10:9: remark: [compileAndLoadModule] Loop iteration '1' for pid '90725' while compiling/loading module 'SubFrameworks' [-Rmodule-build]
+2019111811295582147000 MainFramework/MainC.h:10:2: remark: [ASTReader::getInputFile] file 'testDerivedData/Build/Intermediates.noindex/SubFrameworks.build/Debug/SubFrameworks.build/module.modulemap' has been modified since the module file 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' was built: mtime changed [-Rmodule-build]
+2019111811295582180000 MainFramework/MainE.h:10:2: remark: [ASTReader::getInputFile] file 'testDerivedData/Build/Intermediates.noindex/SubFrameworks.build/Debug/SubFrameworks.build/module.modulemap' has been modified since the module file 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' was built: mtime changed [-Rmodule-build]
+2019111811295582203000 MainFramework/MainC.h:10:2: remark: [ASTReader::ReadControlBlock] control block file out of date 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295582234000 MainFramework/MainC.h:10:2: remark: [ASTReader::ReadASTCore] control block returned out of date 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295582243000 MainFramework/MainE.h:10:2: remark: [ASTReader::ReadControlBlock] control block file out of date 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295582268000 MainFramework/MainC.h:10:2: remark: [ASTReader::ReadAST] removing out of date module 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295582274000 MainFramework/MainE.h:10:2: remark: [ASTReader::ReadASTCore] control block returned out of date 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295582309000 MainFramework/MainE.h:10:2: remark: [ASTReader::ReadAST] removing out of date module 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/SubFrameworks-3U5BOV1R8307A.pcm' [-Rmodule-build]
+2019111811295582316000 MainFramework/MainC.h:10:9: remark: [CompilerInstance::loadModule] cached module 'SubFrameworks' was out of date [-Rmodule-build]
+2019111811295582355000 MainFramework/MainE.h:10:9: remark: [CompilerInstance::loadModule] cached module 'SubFrameworks' was out of date [-Rmodule-build]
+2019111811295582411000 MainFramework/MainC.h:10:9: remark: [compileAndLoadModule] Loop iteration '1' for pid '90728' while compiling/loading module 'SubFrameworks' [-Rmodule-build]
+2019111811295582412000 MainFramework/MainE.h:10:9: remark: [compileAndLoadModule] Loop iteration '1' for pid '90727' while compiling/loading module 'SubFrameworks' [-Rmodule-build]
+2019111811295585072000 SubFrameworks/SubFrameworks.h:9:2: remark: [ASTReader::ReadAST] successfully loaded 'testDerivedData/ModuleCache.noindex/4ZNU7QMPSADY/Foundation-2PSPYZLNW14KI.pcm' [-Rmodule-build]
+2019111811295599758000 SubFrameworks/SubFrameworks.h:9:9: remark: [CompilerInstance::loadModule] successfully read 'Foundation' from the cache [-Rmodule-build]
+```
 
-Consult the
-[Getting Started with LLVM](https://llvm.org/docs/GettingStarted.html#getting-started-with-llvm)
-page for detailed information on configuring and compiling LLVM. You can visit
-[Directory Layout](https://llvm.org/docs/GettingStarted.html#directory-layout)
-to learn about the layout of the source code tree.
+## Other notes
+
+I have also *messed around* with other bits of the code, and hopefully by the
+time you see this I have backed out the more dangerous of those hacks that I
+made in an attempt to influence `clang`'s behavior.
+
+Some things I tried:
+
+* "Fixing" the exponential backoff strategy in the `LockFileManager` to
+  introduce some randomness in the delay times. (Yes, I am aware that I
+  am using terrible RNG code.)
+
+* Forcing the `ASTReader` to check file contents when the `mtime` has changed.
+
+Clearly I am *way* out of my lane here, but I figured I'd poke the bear a
+little bit to see how it changed its behavior.
+
+
+## Closing thoughts
+
+I hope that my random prodding about will somehow help the developer(s)
+tasked with resolving these issues. 
+
+There are probably other things I should have been doing instead of poking at
+`clang`, but this is a *really nasty issue* that is costing me significant
+amounts of wasted time waiting for builds to complete, so I hoped that perhaps
+I could speed up the effort by shining a spotlight on this.
+
+Also, it's very likely that Xcode (or the file system) is responsible for this
+error, and not `clang`. The fact that "dirtiness" seems to be defined as the
+source `modulemap` file's `mtime` changing after every successful dependency
+module build raises a red flag for me.
+
+Good luck!
